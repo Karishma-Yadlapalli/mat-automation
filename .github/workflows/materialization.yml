@@ -96,22 +96,35 @@ jobs:
       - name: Generate SQL
         id: gen
         uses: actions/github-script@v7
+        env:
+          PIPELINE:     ${{ steps.parse.outputs.pipeline }}
+          REQ_TYPE:     ${{ steps.parse.outputs.request_type }}
+          STAGE_OBJ:    ${{ steps.parse.outputs.stage_obj }}
+          CORE_OBJ:     ${{ steps.parse.outputs.core_obj }}
+          SRC_COL:      ${{ steps.parse.outputs.src_col }}
+          PKS:          ${{ steps.parse.outputs.pks }}
+          SOURCES:      ${{ steps.parse.outputs.source_types }}
+          STAGE_PROJ:   ${{ steps.parse.outputs.stage_proj }}
+          TARGET_PROJ:  ${{ steps.parse.outputs.target_proj }}
+          MAT_PROJ:     ${{ steps.parse.outputs.mat_proj }}
+          COL_MAPPINGS: ${{ steps.parse.outputs.col_mappings }}
+          ETL_VIEW_SQL: ${{ steps.parse.outputs.etl_view_sql }}
         with:
           script: |
             const fs = require('fs');
 
-            const PIPELINE    = '${{ steps.parse.outputs.pipeline }}';
-            const REQ_TYPE    = '${{ steps.parse.outputs.request_type }}';
-            const STAGE_OBJ   = '${{ steps.parse.outputs.stage_obj }}';
-            const CORE_OBJ    = '${{ steps.parse.outputs.core_obj }}';
-            const SRC_COL     = '${{ steps.parse.outputs.src_col }}';
-            const PKS         = '${{ steps.parse.outputs.pks }}';
-            const SOURCES     = '${{ steps.parse.outputs.source_types }}';
-            const STAGE_PROJ  = '${{ steps.parse.outputs.stage_proj }}';
-            const TARGET_PROJ = '${{ steps.parse.outputs.target_proj }}';
-            const MAT_PROJ    = '${{ steps.parse.outputs.mat_proj }}';
-            const MAPPINGS    = `${{ steps.parse.outputs.col_mappings }}`;
-            const ETL_SQL     = `${{ steps.parse.outputs.etl_view_sql }}`;
+            const PIPELINE    = process.env.PIPELINE    || '';
+            const REQ_TYPE    = process.env.REQ_TYPE    || '';
+            const STAGE_OBJ   = process.env.STAGE_OBJ   || '';
+            const CORE_OBJ    = process.env.CORE_OBJ    || '';
+            const SRC_COL     = process.env.SRC_COL     || '';
+            const PKS         = process.env.PKS         || '';
+            const SOURCES     = process.env.SOURCES     || '';
+            const STAGE_PROJ  = process.env.STAGE_PROJ  || '';
+            const TARGET_PROJ = process.env.TARGET_PROJ || '';
+            const MAT_PROJ    = process.env.MAT_PROJ    || '';
+            const MAPPINGS    = process.env.COL_MAPPINGS || '';
+            const ETL_SQL     = process.env.ETL_VIEW_SQL || '';
 
             const SRC_ARR    = SOURCES.split(',').map(s => s.trim()).filter(Boolean);
             const pkList     = PKS.split(',').map(k => k.trim());
@@ -584,6 +597,16 @@ jobs:
 
       - name: Post SQL for review
         uses: actions/github-script@v7
+        env:
+          PIPELINE:     ${{ steps.parse.outputs.pipeline }}
+          REQ_TYPE:     ${{ steps.parse.outputs.request_type }}
+          STAGE_OBJ:    ${{ steps.parse.outputs.stage_obj }}
+          CORE_OBJ:     ${{ steps.parse.outputs.core_obj }}
+          STAGE_PROJ:   ${{ steps.parse.outputs.stage_proj }}
+          TARGET_PROJ:  ${{ steps.parse.outputs.target_proj }}
+          MAT_PROJ:     ${{ steps.parse.outputs.mat_proj }}
+          SOURCE_TYPES: ${{ steps.parse.outputs.source_types }}
+          PKS:          ${{ steps.parse.outputs.pks }}
         with:
           script: |
             const fs = require('fs');
@@ -594,21 +617,29 @@ jobs:
               sql = 'ERROR: Failed to read generated SQL file.';
             }
 
-            const pipeline = '${{ steps.parse.outputs.pipeline }}';
+            const pipeline       = process.env.PIPELINE     || '';
+            const reqType        = process.env.REQ_TYPE      || '';
+            const stageObj       = process.env.STAGE_OBJ     || '';
+            const coreObj        = process.env.CORE_OBJ      || '';
+            const stageProj      = process.env.STAGE_PROJ    || '';
+            const targetProj     = process.env.TARGET_PROJ   || '';
+            const matProj        = process.env.MAT_PROJ      || '';
+            const sourceTypes    = process.env.SOURCE_TYPES  || '';
+            const pks            = process.env.PKS           || '';
             const notImplemented = sql.includes('not yet implemented');
 
             const body =
               `## Generated Materialization SQL\n\n` +
               `| Field | Value |\n|---|---|\n` +
               `| **Pipeline** | ${pipeline} |\n` +
-              `| **Request Type** | ${{ steps.parse.outputs.request_type }} |\n` +
-              `| **Stage Object** | \`${{ steps.parse.outputs.stage_obj }}\` |\n` +
-              `| **Core Object** | \`${{ steps.parse.outputs.core_obj }}\` |\n` +
-              `| **Stage Project** | \`${{ steps.parse.outputs.stage_proj }}\` |\n` +
-              `| **Target Project** | \`${{ steps.parse.outputs.target_proj }}\` |\n` +
-              `| **Mat Project** | \`${{ steps.parse.outputs.mat_proj }}\` |\n` +
-              `| **Source Types** | ${{ steps.parse.outputs.source_types }} |\n` +
-              `| **Primary Keys** | ${{ steps.parse.outputs.pks }} |\n\n` +
+              `| **Request Type** | ${reqType} |\n` +
+              `| **Stage Object** | \`${stageObj}\` |\n` +
+              `| **Core Object** | \`${coreObj}\` |\n` +
+              `| **Stage Project** | \`${stageProj}\` |\n` +
+              `| **Target Project** | \`${targetProj}\` |\n` +
+              `| **Mat Project** | \`${matProj}\` |\n` +
+              `| **Source Types** | ${sourceTypes} |\n` +
+              `| **Primary Keys** | ${pks} |\n\n` +
               (notImplemented
                 ? `> ⚠️ **SQL generation for \`${pipeline}\` is not yet automated.** ` +
                   `Please use \`/execute\` with your SQL in a code block to proceed manually.\n\n`
