@@ -646,7 +646,7 @@ jobs:
       contains(github.event.issue.labels.*.name, 'type:materialization') &&
       (startsWith(github.event.comment.body, '/approve') ||
        startsWith(github.event.comment.body, '/execute'))
-    runs-on: [self-hosted, Linux, external-k8s]
+    runs-on: ubuntu-latest  # TEST: changed from self-hosted
 
     steps:
       - name: Parse inputs
@@ -684,14 +684,14 @@ jobs:
               core.setOutput('mode', 'approve');
             }
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: "projects/911179317008/locations/global/workloadIdentityPools/wif-pool-control-github-01/providers/iac-bcs-csw-core-np"
-          service_account: "sa-wif-ghactions@bcs-csw-core-np.iam.gserviceaccount.com"
-
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@v2
+      # TEST: GCP auth disabled for personal repo testing
+      # - name: Authenticate to Google Cloud
+      #   uses: google-github-actions/auth@v2
+      #   with:
+      #     workload_identity_provider: "projects/911179317008/..."
+      #     service_account: "sa-wif-ghactions@bcs-csw-core-np.iam.gserviceaccount.com"
+      # - name: Setup gcloud
+      #   uses: google-github-actions/setup-gcloud@v2
 
       - name: Get SQL to execute
         id: sql
@@ -712,15 +712,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Execute SQL statements
+      # TEST: Dry-run mode — prints each SQL statement instead of running bq query
+      - name: Execute SQL statements (DRY RUN)
         id: exec
         run: |
-          STAGE_PROJ="${{ steps.parse.outputs.stage_proj }}"
-          TARGET_PROJ="${{ steps.parse.outputs.target_proj }}"
-          MAT_PROJ="${{ steps.parse.outputs.mat_proj }}"
           RESULTS=""
           STEP=0
-          ALL_OK=true
 
           while IFS= read -r stmt; do
             [ -z "$(echo "$stmt" | tr -d '[:space:]')" ] && continue
@@ -728,80 +725,20 @@ jobs:
 
             STEP=$((STEP + 1))
             echo ""
-            echo "=== Step ${STEP} ==="
+            echo "=== Step ${STEP} (DRY RUN) ==="
             echo "${stmt}"
-
-            # Route to the correct billing project
-            PROJECT="${TARGET_PROJ}"
-            if echo "${stmt}" | grep -qi "${STAGE_PROJ}"; then
-              PROJECT="${STAGE_PROJ}"
-            elif echo "${stmt}" | grep -qi "${MAT_PROJ}"; then
-              PROJECT="${MAT_PROJ}"
-            elif echo "${stmt}" | grep -qi "bcs-csw-materialization-dev"; then
-              PROJECT="bcs-csw-materialization-dev"
-            fi
-
-            START=$(date +%s)
-            if bq query \
-              --project_id="${PROJECT}" \
-              --use_legacy_sql=false \
-              --max_rows=0 \
-              "${stmt}" 2>/tmp/err.txt; then
-              DUR=$(( $(date +%s) - START ))
-              echo "Step ${STEP} OK (${DUR}s)"
-              RESULTS="${RESULTS}| ${STEP} | ✅ Success | ${DUR}s |\n"
-            else
-              DUR=$(( $(date +%s) - START ))
-              ERR=$(head -1 /tmp/err.txt)
-              echo "Step ${STEP} FAILED: ${ERR}"
-              RESULTS="${RESULTS}| ${STEP} | ❌ Failed: ${ERR} | ${DUR}s |\n"
-              ALL_OK=false
-              break
-            fi
+            RESULTS="${RESULTS}| ${STEP} | ✅ Dry-run OK | 0s |\n"
           done < <(awk 'BEGIN{RS=";"}{gsub(/^\n+|\n+$/,""); if(NF) print}' /tmp/to_execute.sql)
 
           printf "${RESULTS}" > /tmp/results.txt
-          if [ "${ALL_OK}" = false ]; then exit 1; fi
-          echo "All steps completed successfully."
+          echo "Dry-run complete — $STEP statements parsed."
 
-      - name: Verify — sample data
+      # TEST: Verify step skipped — no BQ access in personal repo
+      - name: Verify — sample data (SKIPPED IN TEST)
         id: verify
         if: success()
         run: |
-          TARGET_PROJ="${{ steps.parse.outputs.target_proj }}"
-          STAGE_PROJ="${{ steps.parse.outputs.stage_proj }}"
-          STAGE_OBJ="${{ steps.parse.outputs.stage_obj }}"
-          CORE_OBJ="${{ steps.parse.outputs.core_obj }}"
-          SRC_COL="${{ steps.parse.outputs.src_col }}"
-          echo "" > /tmp/samples.txt
-
-          if [ -n "${STAGE_OBJ}" ]; then
-            TBL="${STAGE_PROJ}.stage_eu.${STAGE_OBJ}"
-            echo "#### ${TBL}" >> /tmp/samples.txt
-            echo '```' >> /tmp/samples.txt
-            bq query --project_id="${STAGE_PROJ}" --use_legacy_sql=false --format=pretty --max_rows=5 \
-              "SELECT * FROM \`${TBL}\` LIMIT 5" >> /tmp/samples.txt 2>&1 || true
-            echo '```' >> /tmp/samples.txt
-            echo "" >> /tmp/samples.txt
-          fi
-
-          if [ -n "${CORE_OBJ}" ]; then
-            TBL="${TARGET_PROJ}.core_t.${CORE_OBJ}"
-            echo "#### ${TBL}" >> /tmp/samples.txt
-            echo '```' >> /tmp/samples.txt
-            bq query --project_id="${TARGET_PROJ}" --use_legacy_sql=false --format=pretty --max_rows=5 \
-              "SELECT * FROM \`${TBL}\` LIMIT 5" >> /tmp/samples.txt 2>&1 || true
-            echo '```' >> /tmp/samples.txt
-            echo "" >> /tmp/samples.txt
-
-            if [ -n "${SRC_COL}" ]; then
-              echo "#### Row counts by source" >> /tmp/samples.txt
-              echo '```' >> /tmp/samples.txt
-              bq query --project_id="${TARGET_PROJ}" --use_legacy_sql=false --format=pretty --max_rows=20 \
-                "SELECT ${SRC_COL}, COUNT(*) as cnt FROM \`${TBL}\` GROUP BY 1" >> /tmp/samples.txt 2>&1 || true
-              echo '```' >> /tmp/samples.txt
-            fi
-          fi
+          echo "Verify step skipped in test mode (no BQ access)." > /tmp/samples.txt
 
       - name: Post results
         if: always()
