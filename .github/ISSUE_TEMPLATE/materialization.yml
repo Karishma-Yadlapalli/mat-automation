@@ -1,0 +1,244 @@
+name: "Materialization Automation"
+description: "Materialization Steps for the given object"
+title: "[Materialization Request] - "
+labels: ["type:materialization", "status:intake"]
+
+body:
+  - type: input
+    id: req-cwid
+    attributes:
+      label: "Requested For (CWID)"
+      placeholder: "CWID of requestor"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pipeline-type
+    attributes:
+      label: "Pipeline Type"
+      options:
+        - "Source -> Stage"
+        - "Stage -> Core"
+        - "Core -> Veg Lake"
+        - "Core -> Veg Materialization"
+        - "Veg -> Veg Mart"
+        - "Core -> Core Fin Materialization"
+        - "Core Fin -> Fin Lake"
+        - "Fin -> Fin Mart"
+        - "Source -> Stage SFDC"
+        - "Stage SFDC -> SFDC Core"
+        - "Core -> DSR"
+        - "Core -> TMP"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: request-type
+    attributes:
+      label: "Request Type"
+      description: "Select 'New Object' for a fresh materialization. Select an Enhancement type for modifications to existing objects."
+      options:
+        - "New Object"
+        - "Enhancement - Extend/Add Source"
+        - "Enhancement - Add New Columns"
+        - "Enhancement - Logic Change of ETL View"
+    validations:
+      required: true
+
+  - type: input
+    id: source-obj-name
+    attributes:
+      label: "Source/Stage Object Name"
+      description: "Object name on the source or stage side. For SAP: table name in sap_{source}_df_etl_v datasets."
+      placeholder: "e.g. EKBE (SAP) or assigned_questionnaire__c (SFDC)"
+    validations:
+      required: true
+
+  - type: input
+    id: core-obj-name
+    attributes:
+      label: "Core/Target Object Name"
+      description: "Object name on the target/core side. Leave blank for Source->Stage only pipelines."
+      placeholder: "e.g. phy_smpl_chng_log or sfgi_assng_qstnn__c"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: source-type
+    attributes:
+      label: "Select the required source type"
+      description: "SAP sources: x08, xbc, x4s, s1x, xmd, s2x, xm4 | SFDC sources: na, emea, fin, veg, gme, spoke_us"
+      options:
+        - label: "x08"
+        - label: "xbc"
+        - label: "x4s"
+        - label: "s1x"
+        - label: "xmd"
+        - label: "s2x"
+        - label: "xm4"
+        - label: "na"
+        - label: "emea"
+        - label: "fin"
+        - label: "veg"
+        - label: "gme"
+        - label: "spoke_us"
+    validations:
+      required: true
+
+  - type: input
+    id: source-type-column
+    attributes:
+      label: "Source Type Column Name"
+      description: "Column used to filter by source type in WHERE clause"
+      placeholder: "e.g. sap_src_sys_cd (SAP) or sfdc_src_sys_cd (SFDC)"
+    validations:
+      required: true
+
+  - type: input
+    id: primary-keys
+    attributes:
+      label: "Primary Keys"
+      description: "Comma-separated primary key columns"
+      placeholder: "e.g. id,sap_src_sys_cd"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: "Environment"
+      options:
+        - "Non-Production"
+        - "Production"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage-project
+    attributes:
+      label: "Stage Project Name"
+      description: "BigQuery project where stage/source ETL views live"
+      options:
+        - bcs-csw-sap-stage-np
+        - bcs-csw-sap-stage
+        - bcs-csw-sfdc-np
+        - bcs-csw-sfdc
+        - bcs-csw-core-np
+        - bcs-csw-core
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target-project
+    attributes:
+      label: "Target Project Name"
+      description: "BigQuery project for the target/core layer"
+      options:
+        - bcs-csw-core-np
+        - bcs-csw-core
+        - bcs-na-access-np
+        - bcs-na-access
+        - bcs-market360-datasets
+        - bcs-m360-na-mart-np
+        - bcs-m360-na-mart
+        - bcs-veg-lake-np
+        - bcs-veg-lake
+        - bcs-csw-fin-np
+        - bcs-csw-fin
+        - bcs-veg-mart-np
+        - bcs-veg-mart
+        - bcs-csw-emea-np
+        - bcs-csw-emea
+    validations:
+      required: true
+
+  - type: dropdown
+    id: materialization-project
+    attributes:
+      label: "Materialization Project"
+      options:
+        - bcs-csw-materialization-np
+        - bcs-csw-materialization
+    validations:
+      required: true
+
+  - type: dropdown
+    id: project-exchange-name
+    attributes:
+      label: "Project Exchange Name"
+      options:
+        - CSW_Core_NP
+        - M360_NA_CSW_NP
+        - CSW_EMEA_NP
+        - CSW_Core_FIN_NP
+        - CSW_FIN_NP
+        - Veg_Lake_NP
+        - Veg_Mart_NP
+        - M360_NA_Mart_NP
+        - Market360_Datasets_NP
+        - CSW_Core
+        - M360_NA_CSW
+        - CSW_EMEA
+        - CSW_Core_FIN
+        - CSW_FIN
+        - Veg_Lake
+        - Veg_Mart
+        - M360_NA_Mart
+        - Market360_Datasets
+    validations:
+      required: true
+
+  - type: textarea
+    id: column-mappings
+    attributes:
+      label: "Column Mappings"
+      description: |
+        **SAP pipelines only** — Used to auto-generate the ETL view. One mapping per line: `source_column AS target_column`.
+        Do NOT include: action_type, row_insert_timestamp, row_update_timestamp, or the source-type column (added automatically).
+        Leave blank if you are providing a full ETL View SQL below instead.
+      placeholder: |
+        bname AS usr_id
+        name1 AS first_nm
+        name2 AS last_nm
+      render: sql
+    validations:
+      required: false
+
+  - type: textarea
+    id: etl-view-sql
+    attributes:
+      label: "ETL View SQL"
+      description: |
+        Paste the full `CREATE OR REPLACE VIEW` statement for the ETL view (stage or core depending on pipeline).
+        **Required for SFDC pipelines.** For SAP pipelines, leave blank to auto-generate from Column Mappings above, or paste here to override.
+      placeholder: "CREATE OR REPLACE VIEW `project.dataset.object` AS ..."
+      render: sql
+    validations:
+      required: false
+
+  - type: textarea
+    id: business-justification
+    attributes:
+      label: "Use Case"
+      description: "Provide business justification for this materialization"
+      placeholder: "Provide a short explanation of why this object materialization is needed."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: "Confirm"
+      options:
+        - label: "I confirm this request follows all Materialization steps and has business approval."
+        - label: "I confirm this request will trigger an automated GitHub Actions workflow requiring team review before execution."
+    validations:
+      required: true
+
+  - type: input
+    id: manager-approval
+    attributes:
+      label: "Manager Approval"
+      description: "Manager name or attach approval reference"
+    validations:
+      required: false
