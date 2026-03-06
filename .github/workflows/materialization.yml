@@ -427,17 +427,12 @@ jobs:
               }
               blank();
 
-              // Step 2: Create ETL Views via stored proc (was Step 2, now renumbered — old per-source filter views removed)
-              header('Create ETL Views (sp_create_sap_core_etl_viewsV2)');
-              line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_sap_core_etl_viewsV2\`('${CORE_OBJ}_base');`);
-              blank();
-
-              // Step 3: Per-source filter views via stored proc
+              // Step 2: Per-source filter views via stored proc
               header('Per-Source Filter Views (sp_create_sap_core_etl_views_src_v1)');
               line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_sap_core_etl_views_src_v1\`('${TARGET_PROJ}','${CORE_OBJ}_base',${srcListStr});`);
               blank();
 
-              // Step 4: Table Keys
+              // Step 3: Table Keys
               header('Load Table Keys');
               for (const src of SRC_ARR) {
                 line(`CALL \`${MAT_PROJ}.${C_DML}.auto_load_table_keys\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}_${src}',${PK_FMT});`);
@@ -445,43 +440,43 @@ jobs:
               line(`CALL \`${MAT_PROJ}.${C_DML}.auto_load_table_keys\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}',${PK_FMT});`);
               blank();
 
-              // Step 5: Control Tables
+              // Step 4: Control Tables
               header('Control Tables');
               for (const src of SRC_ARR) {
                 line(`CALL \`${MAT_PROJ}.${C_DML}.auto_create_ctrl_table\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}_${src}','${TARGET_PROJ}','${C_DS}','${CORE_OBJ}');`);
               }
               blank();
 
-              // Step 6: Create core_t and core_temp_t
+              // Step 5: Create core_t and core_temp_t
               header('Create core_t and core_temp_t');
               line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_sap_core_tables\`('${CORE_OBJ}_base');`);
               blank();
 
-              // Step 7: Create Base Views
+              // Step 6: Create Base Views
               header('Create Base Views');
               line(`CALL \`bcs-csw-materialization-dev.${C_DML}.sp_create_base_views\`('${TARGET_PROJ}','core','${CORE_OBJ}');`);
               blank();
 
-              // Step 8: Metadata Refresh
+              // Step 7: Metadata Refresh
               header('Metadata Refresh');
               line(`CALL \`${MAT_PROJ}.${C_DML}.sp_run_mtlz_lo\`('${TARGET_PROJ}','${C_META_V}','column_metadata','${TARGET_PROJ}','${C_META_T}','column_metadata','LDUI');`);
               blank();
 
-              // Step 9: Core Materialization
+              // Step 8: Core Materialization
               header('Core Materialization');
               for (const src of SRC_ARR) {
                 line(`CALL \`${MAT_PROJ}.${C_DML}.sp_run_mtlz_lo\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}_${src}','${TARGET_PROJ}','${C_DS}','${CORE_OBJ}','CLDUI');`);
               }
               blank();
 
-              // Step 10: Stage Base TVFs
+              // Step 9: Stage Base TVFs
               header('Stage Base TVFs');
               for (const src of SRC_ARR) {
                 line(`CALL \`${STAGE_PROJ}.${C_DML}.sp_create_base_sap_tvf\`('${STAGE_PROJ}','sap_${src}_df_etl_v','${STAGE_OBJ}');`);
               }
               blank();
 
-              // Step 11: Consolidated Control Table
+              // Step 10: Consolidated Control Table
               header('Consolidated Control Table');
               line(`CREATE OR REPLACE TABLE \`${TARGET_PROJ}.${C_CTRL}.etl_ctrl_${C_ETL_V}_${CORE_OBJ}\` AS`);
               SRC_ARR.forEach((src, idx) => {
@@ -491,7 +486,7 @@ jobs:
               line(';');
               blank();
 
-              // Step 12: TVF Materialization (Airflow DAG Call)
+              // Step 11: TVF Materialization (Airflow DAG Call)
               header('TVF Materialization');
               line('--Airflow DAG Call--');
               blank();
