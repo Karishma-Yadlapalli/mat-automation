@@ -128,14 +128,56 @@ jobs:
 
             const SRC_ARR    = SOURCES.split(',').map(s => s.trim()).filter(Boolean);
             const pkList     = PKS.split(',').map(k => k.trim());
-            const PK_FMT     = "['" + pkList.join("','") + "']";
+            const PK_FMT     = "\"['" + pkList.join("','") + "']\"";
             const srcListStr = "[" + SRC_ARR.map(s => `'${s}'`).join(',') + "]";
 
             // ── Input mode ──────────────────────────────────────────
             // MAPPINGS = user gave column mappings → auto-generate the view
             // ETL_SQL  = user gave full SQL → use as-is
             const USE_MAPPINGS = !!MAPPINGS.trim() && !ETL_SQL.trim();
-            const mappingLines = MAPPINGS.split('\n').filter(l => l.trim());
+            const rawMappingLines = MAPPINGS.split('\n').filter(l => l.trim());
+
+            // ── Reorder mapping lines: PKs first, then remaining ────
+            // Each mapping line looks like: source_col AS alias
+            // Match alias (after AS) against pkList to determine order
+            function reorderMappings(lines, pkColumns, srcColName) {
+              const parsed = lines.map(l => {
+                const cleaned = l.trim().replace(/,\s*$/, ''); // strip trailing comma
+                const asMatch = cleaned.match(/\bAS\s+(\S+)\s*$/i);
+                const alias = asMatch ? asMatch[1].trim() : '';
+                return { line: cleaned, alias };
+              });
+
+              // Separate into: PK columns (excluding src_col), src_col itself, and non-PK
+              const pkSet = new Set(pkColumns.map(k => k.toLowerCase()));
+              const srcColLower = srcColName.toLowerCase();
+
+              const pkMappings = [];
+              const nonPkMappings = [];
+
+              for (const p of parsed) {
+                const aliasLower = p.alias.toLowerCase();
+                // Skip if it matches the source type column — it's auto-added
+                if (aliasLower === srcColLower) continue;
+                if (pkSet.has(aliasLower)) {
+                  pkMappings.push(p);
+                } else {
+                  nonPkMappings.push(p);
+                }
+              }
+
+              // Order PK mappings in the same order as pkList
+              const orderedPk = [];
+              for (const pk of pkColumns) {
+                if (pk.toLowerCase() === srcColLower) continue;
+                const found = pkMappings.find(p => p.alias.toLowerCase() === pk.toLowerCase());
+                if (found) orderedPk.push(found);
+              }
+
+              return [...orderedPk, ...nonPkMappings];
+            }
+
+            const mappingLines = reorderMappings(rawMappingLines, pkList, SRC_COL);
 
             // ── Dataset name constants ──────────────────────────────
             // SAP Stage side (_eu suffix)
@@ -174,48 +216,68 @@ jobs:
               blank();
             };
 
-            // ── Shared: standard UNION ALL tail columns ─────────────
-            // Appended to every auto-generated SELECT block
-            const stdTail = () => {
-              line(`  '${SRC_COL}_placeholder' AS ${SRC_COL},`); // overridden per pipeline below
-              line('  action_type,');
-              line('  row_insert_timestamp,');
-              line('  row_update_timestamp');
-            };
+            // ── Emit reordered mapping columns ──────────────────────
+            // Writes PK columns first, then source type col, then rest
+            function emitMappingColumns(indent) {
+              const pfx = indent || '  ';
+              // PK columns (already ordered by reorderMappings)
+              const pkSet = new Set(pkList.map(k => k.toLowerCase()));
+              const srcColLower = SRC_COL.toLowerCase();
+              const pkLines = mappingLines.filter(m => pkSet.has(m.alias.toLowerCase()) && m.alias.toLowerCase() !== srcColLower);
+              const nonPkLines = mappingLines.filter(m => !pkSet.has(m.alias.toLowerCase()));
+
+              // Emit PK columns
+              for (const m of pkLines) {
+                line(`${pfx}${m.line},`);
+              }
+            }
 
             // ── Auto-generate helpers per pipeline ──────────────────
 
+            // Helper to emit all columns in correct order: PKs, src_col, non-PKs
+            function emitOrderedColumns(src) {
+              const pkSet = new Set(pkList.map(k => k.toLowerCase()));
+              const srcColLower = SRC_COL.toLowerCase();
+              const pkLines = mappingLines.filter(m => pkSet.has(m.alias.toLowerCase()));
+              const nonPkLines = mappingLines.filter(m => !pkSet.has(m.alias.toLowerCase()));
+
+              for (const m of pkLines) {
+                line(`  ${m.line},`);
+              }
+              line(`  '${src}' AS ${SRC_COL},`);
+              for (let i = 0; i < nonPkLines.length; i++) {
+                const isLast = (i === nonPkLines.length - 1);
+                if (isLast) {
+                  line(`  ${nonPkLines[i].line},`);
+                } else {
+                  line(`  ${nonPkLines[i].line},`);
+                }
+              }
+              line('  action_type,');
+              line('  row_insert_timestamp,');
+              line('  row_update_timestamp');
+            }
+
             // (A) Source -> Stage (SAP)
-            // Pulls from raw SAP source dataset per src, UNIONs into stage_eu_etl_v view
             function genSourceToStageView() {
               line(`CREATE OR REPLACE VIEW \`${STAGE_PROJ}.${S_ETL_V}.${STAGE_OBJ}\` AS`);
               SRC_ARR.forEach((src, idx) => {
                 if (idx > 0) { blank(); line('UNION ALL'); blank(); }
                 line('SELECT');
-                for (const ml of mappingLines) line(`  ${ml.trim()},`);
-                line(`  '${src}' AS ${SRC_COL},`);
-                line('  action_type,');
-                line('  row_insert_timestamp,');
-                line('  row_update_timestamp');
+                emitOrderedColumns(src);
                 line('FROM');
-                // Raw SAP source dataset naming convention: sap_{src}_raw
                 line(`  \`${STAGE_PROJ}.sap_${src}_raw.${STAGE_OBJ}\``);
               });
               line(';');
             }
 
             // (B) Stage -> Core (SAP)
-            // Pulls from sap_{src}_df_etl_v (the stage ETL views), UNIONs into core _base view
             function genStageToCoreView() {
               line(`CREATE OR REPLACE VIEW \`${TARGET_PROJ}.${C_ETL_V}.${CORE_OBJ}_base\` AS`);
               SRC_ARR.forEach((src, idx) => {
                 if (idx > 0) { blank(); line('UNION ALL'); blank(); }
                 line('SELECT');
-                for (const ml of mappingLines) line(`  ${ml.trim()},`);
-                line(`  '${src}' AS ${SRC_COL},`);
-                line('  action_type,');
-                line('  row_insert_timestamp,');
-                line('  row_update_timestamp');
+                emitOrderedColumns(src);
                 line('FROM');
                 line(`  \`${STAGE_PROJ}.sap_${src}_df_etl_v.${STAGE_OBJ}\``);
               });
@@ -223,36 +285,25 @@ jobs:
             }
 
             // (C) Source -> Stage SFDC
-            // Pulls from raw SFDC source dataset per src, UNIONs into sfdc_etl_v view
             function genSourceToStageSfdcView() {
               line(`CREATE OR REPLACE VIEW \`${STAGE_PROJ}.${SF_ETL_V}.${STAGE_OBJ}\` AS`);
               SRC_ARR.forEach((src, idx) => {
                 if (idx > 0) { blank(); line('UNION ALL'); blank(); }
                 line('SELECT');
-                for (const ml of mappingLines) line(`  ${ml.trim()},`);
-                line(`  '${src}' AS ${SRC_COL},`);
-                line('  action_type,');
-                line('  row_insert_timestamp,');
-                line('  row_update_timestamp');
+                emitOrderedColumns(src);
                 line('FROM');
-                // Raw SFDC source dataset naming convention: sfdc_{src}_raw
                 line(`  \`${STAGE_PROJ}.sfdc_${src}_raw.${STAGE_OBJ}\``);
               });
               line(';');
             }
 
             // (D) Stage SFDC -> SFDC Core
-            // Pulls from sfdc_etl_v (stage ETL views) filtered by src, UNIONs into core_etl_v
             function genStageSfdcToCoreView() {
               line(`CREATE OR REPLACE VIEW \`${TARGET_PROJ}.${C_ETL_V}.${CORE_OBJ}\` AS`);
               SRC_ARR.forEach((src, idx) => {
                 if (idx > 0) { blank(); line('UNION ALL'); blank(); }
                 line('SELECT');
-                for (const ml of mappingLines) line(`  ${ml.trim()},`);
-                line(`  '${src}' AS ${SRC_COL},`);
-                line('  action_type,');
-                line('  row_insert_timestamp,');
-                line('  row_update_timestamp');
+                emitOrderedColumns(src);
                 line('FROM');
                 line(`  \`${STAGE_PROJ}.${SF_ETL_V}.${STAGE_OBJ}\``);
                 line(`WHERE ${SRC_COL} = '${src}'`);
@@ -376,7 +427,7 @@ jobs:
               }
               blank();
 
-              // Step 2: Create ETL Views via stored proc
+              // Step 2: Create ETL Views via stored proc (was Step 2, now renumbered — old per-source filter views removed)
               header('Create ETL Views (sp_create_sap_core_etl_viewsV2)');
               line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_sap_core_etl_viewsV2\`('${CORE_OBJ}_base');`);
               blank();
@@ -440,9 +491,9 @@ jobs:
               line(';');
               blank();
 
-              // Step 12: TVF Left Join + TVF Materialization
-              header('TVF Object Left Join and TVF Materialization');
-              line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_tvf_object_leftjoin\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}_base');`);
+              // Step 12: TVF Materialization (Airflow DAG Call)
+              header('TVF Materialization');
+              line('--Airflow DAG Call--');
               blank();
               line(`CALL \`${MAT_PROJ}.${C_DML}.sp_run_mtlz_cldui_tvf_sap\`('${TARGET_PROJ}','${C_ETL_V}','${CORE_OBJ}','${TARGET_PROJ}','${C_DS}','${CORE_OBJ}',${srcListStr});`);
               blank();
