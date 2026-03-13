@@ -66,14 +66,14 @@ jobs:
             if (!sourceTypes) { core.setFailed('No source types selected');            return; }
 
             // Validate ETL input by pipeline type
-            const sfdc_pipelines = ['Stage SFDC -> SFDC Core', 'Source -> Stage SFDC'];
-            if (sfdc_pipelines.includes(pipeline) && !etlViewSql) {
-              core.setFailed(`SFDC pipelines require a full ETL View SQL — Column Mappings are not supported for ${pipeline}`);
-              return;
-            }
-            const stage_core_sap = pipeline === 'Stage -> Core';
-            if (stage_core_sap && !colMappings && !etlViewSql) {
-              core.setFailed('Stage -> Core requires either Column Mappings or ETL View SQL');
+            // All pipelines now accept either Column Mappings OR ETL View SQL
+            const needsEither = [
+              'Stage SFDC -> SFDC Core',
+              'Source -> Stage SFDC',
+              'Stage -> Core'
+            ];
+            if (needsEither.includes(pipeline) && !colMappings && !etlViewSql) {
+              core.setFailed(`${pipeline} requires either Column Mappings or ETL View SQL`);
               return;
             }
 
@@ -246,16 +246,62 @@ jobs:
               }
               line(`  '${src}' AS ${SRC_COL},`);
               for (let i = 0; i < nonPkLines.length; i++) {
-                const isLast = (i === nonPkLines.length - 1);
-                if (isLast) {
-                  line(`  ${nonPkLines[i].line},`);
-                } else {
-                  line(`  ${nonPkLines[i].line},`);
-                }
+                line(`  ${nonPkLines[i].line},`);
               }
               line('  action_type,');
               line('  row_insert_timestamp,');
               line('  row_update_timestamp');
+            }
+
+            // ── Explicit column list for filter views (mappings mode) ─
+            function getExplicitColumnList() {
+              const pkSet = new Set(pkList.map(k => k.toLowerCase()));
+              const pkCols = mappingLines.filter(m => pkSet.has(m.alias.toLowerCase()));
+              const nonPkCols = mappingLines.filter(m => !pkSet.has(m.alias.toLowerCase()));
+              return [
+                ...pkCols.map(m => m.alias),
+                SRC_COL,
+                ...nonPkCols.map(m => m.alias),
+                'action_type',
+                'row_insert_timestamp',
+                'row_update_timestamp'
+              ];
+            }
+
+            // ── Per-source filter views — explicit columns ──────────
+            // Mappings mode: we know the columns → list them directly
+            // ETL SQL mode:  query INFORMATION_SCHEMA → EXECUTE IMMEDIATE
+            function emitFilterViews(proj, dataset, baseObj) {
+              if (USE_MAPPINGS) {
+                const cols = getExplicitColumnList();
+                const colStr = cols.join(',\n  ');
+                for (const src of SRC_ARR) {
+                  line(`CREATE OR REPLACE VIEW \`${proj}.${dataset}.${baseObj}_${src}\` AS`);
+                  line('SELECT');
+                  line(`  ${colStr}`);
+                  line(`FROM \`${proj}.${dataset}.${baseObj}\``);
+                  line(`WHERE ${SRC_COL} = '${src}';`);
+                  blank();
+                }
+              } else {
+                // Dynamic: retrieve column names from INFORMATION_SCHEMA
+                line('DECLARE _filter_cols STRING;');
+                line(`SET _filter_cols = (`);
+                line(`  SELECT STRING_AGG(column_name, ', ' ORDER BY ordinal_position)`);
+                line(`  FROM \`${proj}.${dataset}.INFORMATION_SCHEMA.COLUMNS\``);
+                line(`  WHERE table_name = '${baseObj}'`);
+                line(`);`);
+                blank();
+                for (const src of SRC_ARR) {
+                  line(`EXECUTE IMMEDIATE FORMAT(`);
+                  line(`  """CREATE OR REPLACE VIEW \`${proj}.${dataset}.${baseObj}_${src}\` AS`);
+                  line(`  SELECT %s FROM \`${proj}.${dataset}.${baseObj}\``);
+                  line(`  WHERE ${SRC_COL} = '${src}'""",`);
+                  line(`  _filter_cols`);
+                  line(`);`);
+                  blank();
+                }
+              }
             }
 
             // (A) Source -> Stage (SAP)
@@ -368,13 +414,9 @@ jobs:
               }
               blank();
 
-              // Step 2: Per-source filter views
+              // Step 2: Per-source filter views (explicit columns)
               header('Per-Source Filter Views');
-              for (const src of SRC_ARR) {
-                line(`CREATE OR REPLACE VIEW \`${STAGE_PROJ}.${S_ETL_V}.${STAGE_OBJ}_${src}\` AS`);
-                line(`SELECT * FROM \`${STAGE_PROJ}.${S_ETL_V}.${STAGE_OBJ}\` WHERE ${SRC_COL} = '${src}';`);
-                blank();
-              }
+              emitFilterViews(STAGE_PROJ, S_ETL_V, STAGE_OBJ);
 
               // Step 3: Table Keys
               header('Load Table Keys');
@@ -427,10 +469,9 @@ jobs:
               }
               blank();
 
-              // Step 2: Per-source filter views via stored proc
-              header('Per-Source Filter Views (sp_create_sap_core_etl_views_src_v1)');
-              line(`CALL \`${TARGET_PROJ}.${C_DML}.sp_create_sap_core_etl_views_src_v1\`('${TARGET_PROJ}','${CORE_OBJ}_base',${srcListStr});`);
-              blank();
+              // Step 2: Per-source filter views (explicit columns)
+              header('Per-Source Filter Views');
+              emitFilterViews(TARGET_PROJ, C_ETL_V, `${CORE_OBJ}_base`);
 
               // Step 3: Table Keys
               header('Load Table Keys');
@@ -515,13 +556,9 @@ jobs:
               }
               blank();
 
-              // Step 2: Per-source filter views
+              // Step 2: Per-source filter views (explicit columns)
               header('Per-Source Filter Views');
-              for (const src of SRC_ARR) {
-                line(`CREATE OR REPLACE VIEW \`${STAGE_PROJ}.${SF_ETL_V}.${STAGE_OBJ}_${src}\` AS`);
-                line(`SELECT * FROM \`${STAGE_PROJ}.${SF_ETL_V}.${STAGE_OBJ}\` WHERE ${SRC_COL} = '${src}';`);
-                blank();
-              }
+              emitFilterViews(STAGE_PROJ, SF_ETL_V, STAGE_OBJ);
 
               // Step 3: Table Keys
               header('Load Table Keys');
@@ -574,13 +611,9 @@ jobs:
               }
               blank();
 
-              // Step 2: Per-source filter views
+              // Step 2: Per-source filter views (explicit columns)
               header('Per-Source Filter Views');
-              for (const src of SRC_ARR) {
-                line(`CREATE OR REPLACE VIEW \`${TARGET_PROJ}.${C_ETL_V}.${CORE_OBJ}_${src}\` AS`);
-                line(`SELECT * FROM \`${TARGET_PROJ}.${C_ETL_V}.${CORE_OBJ}\` WHERE ${SRC_COL} = '${src}';`);
-                blank();
-              }
+              emitFilterViews(TARGET_PROJ, C_ETL_V, CORE_OBJ);
 
               // Step 3: Table Keys
               header('Load Table Keys');
