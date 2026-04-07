@@ -1,0 +1,435 @@
+---
+name: CICD
+
+on:
+  pull_request:
+
+  push:
+    branches:
+      - 'bcs-csw-core-np'
+      - 'bcs-csw-core'
+      - 'bcs-csw-core-dr'
+      - 'bcs-csw-control'
+      - 'bcs-csw-core-fin'
+      - 'bcs-csw-core-fin-np'
+
+env:
+  TERRAFORM_CLI_VERSION: '~1.3.0'
+  COMPOSER_BRANCHES: ("bcs-csw-core", "bcs-csw-core-np")
+
+defaults:
+  run:
+    working-directory: ./terraform/live/
+    shell: bash
+
+jobs:
+  build:
+    # Bayer shared-runner to allow IP whitelisting on Composer GKE to run gcloud/airflow cli via GH Actions
+    # https://docs.int.bayer.com/cloud/devops/ghe-self-hosted-runners/#shared-runners-location
+    runs-on: [self-hosted, Linux, external-k8s]
+
+    # Outputs to shared between deployment and build jobs
+    outputs:
+      # Composer related variables
+      env_suffix: ${{ steps.export_tfvars.outputs.env_suffix }}
+      gcp_project_id: ${{ steps.export_tfvars.outputs.gcp_project_id }}
+      # Workload Identity Federation related variables
+      wif_gcp_project_number: ${{ steps.export_tfvars.outputs.wif_gcp_project_number }}
+      wif_pool_id: ${{ steps.export_tfvars.outputs.wif_pool_id }}
+
+    # This Workflow requires custom permissions due to Workload Identity Federation authentication:
+    # id-token: write for WIF, pull-requests: write for Pull Requests comments and contents: read for git checkout/pull
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: write
+
+    steps:
+      - name: Checkout Git repository
+        uses: actions/checkout@v4
+        with:
+          # fetch all history for all branches and tags, so tf-actions/changed-files can get a list of changed Airflow DAGs
+          fetch-depth: 0
+
+      - name: Export tf variables into GitHub Output values for future use in authentication and environment specific tasks
+        id: export_tfvars
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ${{ github.event_name }} = 'pull_request' ]; then
+              {
+                echo "ENV_SUFFIX=$(jq -r .env_suffix env-"${GITHUB_BASE_REF}".tfvars.json)"
+                echo "GCP_PROJECT_ID=$(jq -r .project_id env-"${GITHUB_BASE_REF}".tfvars.json)"
+                echo "WIF_GCP_PROJECT_NUMBER=$(jq -r .wif_gcp_project_number env-"${GITHUB_BASE_REF}".tfvars.json)"
+                echo "WIF_POOL_ID=$(jq -r .wif_pool_id env-"${GITHUB_BASE_REF}".tfvars.json)"
+              } >> "$GITHUB_OUTPUT"
+          elif [ ${{ github.event_name }} = 'push' ]; then
+              {
+                  echo "ENV_SUFFIX=$(jq -r .env_suffix env-"${GITHUB_REF_NAME}".tfvars.json)"
+                  echo "GCP_PROJECT_ID=$(jq -r .project_id env-"${GITHUB_REF_NAME}".tfvars.json)"
+                  echo "WIF_GCP_PROJECT_NUMBER=$(jq -r .wif_gcp_project_number env-"${GITHUB_REF_NAME}".tfvars.json)"
+                  echo "WIF_POOL_ID=$(jq -r .wif_pool_id env-"${GITHUB_REF_NAME}".tfvars.json)"
+              } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get filenames from changed Composer DAGs and its parameter json files
+        if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+        id: changed_airflow_dags
+        uses: tj-actions/changed-files@v46
+        with:
+          files: terraform/live/composer-dags/${{ steps.export_tfvars.outputs.env_suffix }}/**/*.{py,json}
+          json: true
+          write_output_files: true
+
+      - name: Export list of changed Airflow DAGs into a formatted file
+        if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+        run: |
+          echo '${{ toJSON(steps.changed_airflow_dags.outputs) }}'
+          jq '.[]' ${{ github.workspace }}/.github/outputs/added_files.json > /tmp/added_files.json
+          jq '.[]' ${{ github.workspace }}/.github/outputs/deleted_files.json > /tmp/deleted_files.json
+          jq '.[]' ${{ github.workspace }}/.github/outputs/modified_files.json > /tmp/modified_files.json
+          jq '.[]' ${{ github.workspace }}/.github/outputs/renamed_files.json > /tmp/renamed_files.json
+          # When PR only changes files defined in the "with" argument for tj-actions/changed-files step the ".github/outputs/other_modified_files.json" does not exist
+          # so we should provide an empty file so the PR commenter step will not fail
+          jq '.[]' ${{ github.workspace }}/.github/outputs/other_modified_files.json > /tmp/other_modified_files.json || touch /tmp/other_modified_files.json
+
+      - name: Print available environment variables and OS info
+        run: |
+          cat /etc/os-release
+          printenv | sort
+
+      # Temporarily disabled the next two steps to improve performance - to do: improve speed and output error
+      # # pytest for basic DAG validation
+      # - name: Setup Python
+      #   uses: actions/setup-python@v4
+      #   if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+      #   with:
+      #     python-version: "3.8"
+      #     cache: 'pip'
+      # - name: pytest for DAG validation
+      #   if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+      #   # TODO - ignoring errors as not all DAGs comply with pytest validations
+      #   continue-on-error: true
+      #   working-directory: ./airflow-local-dev
+      #   env:
+      #     PYTHONPATH: "../terraform/live/composer-operators"
+      #   run: |
+      #     set -x
+      #     python --version
+      #     python -m pip install --upgrade pip
+      #     python -m pip install -r requirements.txt
+      #     ansible-playbook ansible/composer-pytest.yml --extra-vars git_repo_dir="${GITHUB_WORKSPACE}"
+      #     python -W ignore -m pytest --disable-pytest-warnings --tb=line
+
+      # # Airflow docker image to test listing all dags to look for importing errors
+      # - name: Airflow DAG list import errors
+      #   if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+      #   # TODO - ignoring errors as dag "dag_qms_intelex_data.py" requires google authentication to run import errors
+      #   continue-on-error: true
+      #   run: |
+      #     docker run --rm -d --name airflow-test \
+      #       -v "/$(pwd)/composer-dags/${{ steps.export_tfvars.outputs.env_suffix }}/dags:/opt/airflow/dags" \
+      #       -v "/$(pwd)/composer-dags/${{ steps.export_tfvars.outputs.env_suffix }}/parms:/home/airflow/gcs/data" \
+      #       -v "/$(pwd)/composer-operators:/opt/airflow/plugins" \
+      #       apache/airflow:2.4.3-python3.8 airflow standalone
+      #     docker exec airflow-test python -m pip install pip --upgrade
+      #     docker exec airflow-test python -m pip install networkx
+      #     echo "Sleeping for a few seconds to allow airflow standalone be ready for list-import-errors command. Increase it if airflow db upgrade error message shows up"
+      #     sleep 10
+      #     AIRFLOW_DAGS_IMPORT_ERRORS_LENGTH=$(docker exec airflow-test airflow dags list-import-errors -o json | tee airflow-dags-list-import-errors.log | jq length)
+      #     if [ "${AIRFLOW_DAGS_IMPORT_ERRORS_LENGTH}" -ge 1 ]; then
+      #       echo "Airflow DAG has at least one import error"
+      #       jq . airflow-dags-list-import-errors.log
+      #       exit 99
+      #     fi
+      #     docker stop airflow-test
+
+      # Authentication with Workload Identity Federation and setting up gcloud CLI so terraform can leverage its credentials
+      - name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        id: 'auth'
+        with:
+          workload_identity_provider: "projects/${{ steps.export_tfvars.outputs.wif_gcp_project_number }}/locations/global/workloadIdentityPools/${{ steps.export_tfvars.outputs.wif_pool_id }}/providers/iac-bcs-csw-core-${{ steps.export_tfvars.outputs.env_suffix }}"
+          service_account: "sa-wif-ghactions@${{ steps.export_tfvars.outputs.gcp_project_id }}.iam.gserviceaccount.com"
+          export_environment_variables: true
+          # Not using the access token on this workflow however this is useful for getting faster feedback loop to troubleshoot auth issues otherwise this step can pass even when WIF authentication fails
+          token_format: 'access_token'
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          install_components: 'kubectl,gke-gcloud-auth-plugin'
+
+      - name: gcloud - show credentials info and debugging commands
+        run: gcloud info
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_CLI_VERSION }}
+          # setup-terraform by default makes the tf plan output available as environment variable in GH Actions but when it is too long it fails due to a env size limitation
+          # setting terraform_wrapper to false to avoid this and handling the tf plan output via text file
+          # https://github.com/hashicorp/setup-terraform/issues/24
+          terraform_wrapper: false
+
+      # Terraform init via backend-config flags due to branching strategy for deployments
+      # One GCS terraform backend per Google Project ID that matches the target branch. GCS naming convention: tfstate-us-{google-project-id/or/branch-name}
+      - name: Terraform Init for Pull Request
+        if: github.event_name == 'pull_request'
+        id: init_pr
+        run: terraform init -backend-config="bucket=tfstate-${GITHUB_BASE_REF}" -backend-config="prefix=terraform/state"
+
+      # Linting
+      - name: Terraform Validate
+        if: github.event_name == 'pull_request'
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Output - exporting values into GITHUB_OUTPUT to use in future steps
+        if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+        id: tf_outputs
+        run: |
+          echo airflow_uri="$(terraform output -raw composer_airflow_uri)" >> "${GITHUB_OUTPUT}"
+          echo composer_gcs_bucket_name="$(terraform output -raw composer_gcs_bucket_name)" >> "${GITHUB_OUTPUT}"
+
+      # - name: Push new/changed DAGs on Pull Requests only for bcs-csw-core-np (beta)
+      #   if: github.event_name == 'pull_request' && github.base_ref == 'bcs-csw-core-np' && steps.changed_airflow_dags.outputs.any_modified == 'true'
+      #   working-directory: ${{ github.workspace }}
+      #   env:
+      #     FEATURE_BRANCH: ${{ github.head_ref }}
+      #     COMPOSER_GCS_BUCKET: ${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}
+      #   run: |
+      #     set -x
+      #     # listing all dags and parms files for troubleshooting and debugging before changes are pushed to GCS
+      #     gsutil ls -lh gs://"${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}"/{dags,data}/ | sort -k 3 -r | tee /tmp/gsutil-ls-before-push.log
+
+      #     # for loop to iterate over changes that can leverage the `gsutil cp` command
+      #     declare -a CHANGE_TYPE_LIST=("added" "modified" "renamed")
+      #     for CHANGE_TYPE in "${CHANGE_TYPE_LIST[@]}"
+      #     do
+      #       echo "New ${CHANGE_TYPE} DAGs and Parms files - pushing to Composer GCS bucket ${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}"
+      #       # FILE_TYPE_DICT - this variables maps the convention used locally in the git repo to storage dags and the corresponding folder in Composer GCS Bucket
+      #       # dags are stored in a folder called dags in GCS, however, the parms file are stored in the data directory
+      #       declare -a FILE_TYPE_DICT=("parms:data" "dags:dags")
+      #       for FILE_TYPE in "${FILE_TYPE_DICT[@]}"
+      #       do
+      #         FILE_TYPE_LOCAL_DIR=$(echo "${FILE_TYPE}" | cut -d ":" -f 1)
+      #         FILE_TYPE_GCS_DIR=$(echo "${FILE_TYPE}" | cut -d ":" -f 2)
+      #         grep terraform/live/composer-dags/"${{ steps.export_tfvars.outputs.env_suffix }}"/"${FILE_TYPE_LOCAL_DIR}"/ /tmp/"${CHANGE_TYPE}"_files.json | tee /tmp/"${FILE_TYPE_LOCAL_DIR}"_"${CHANGE_TYPE}"_files.json || true
+      #         if [ -s /tmp/"${FILE_TYPE_LOCAL_DIR}"_"${CHANGE_TYPE}"_files.json ]; then
+      #           cat < /tmp/"${FILE_TYPE_LOCAL_DIR}"_"${CHANGE_TYPE}"_files.json | xargs -I {} gsutil cp {} gs://"${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}"/"${FILE_TYPE_GCS_DIR}"/
+      #         fi
+      #       done
+      #     done
+
+      #     # Get the renamed files (old filename) and explicitly deleted files to delete from GCS on Pull Requests, so it will avoid duplicated Airflow DAG ID import errors preventing a new/renamed DAG to be loaded correctly into Airflow
+      #     git log --name-status  remotes/origin/"${{ github.base_ref}}"... remotes/origin/"${{ env.FEATURE_BRANCH }}" | { grep -e '^R.*terraform/live/composer-dags' -e '^D.*terraform/live/composer-dags' || true; } | awk -F '\t' '{print $2}' | xargs -I {} echo \"{}\" | tee /tmp/renamed_deleted_files.json
+
+      #     # similar for loop for added, modified, and renamed files but now gsutil will delete the old filename from renamed files and explicitly deleted files
+      #     declare -a FILE_TYPE_DICT=("parms:data" "dags:dags")
+      #     for FILE_TYPE in "${FILE_TYPE_DICT[@]}"
+      #     do
+      #       FILE_TYPE_LOCAL_DIR=$(echo "${FILE_TYPE}" | cut -d ":" -f 1)
+      #       FILE_TYPE_GCS_DIR=$(echo "${FILE_TYPE}" | cut -d ":" -f 2)
+      #       grep terraform/live/composer-dags/"${{ steps.export_tfvars.outputs.env_suffix }}"/"${FILE_TYPE_LOCAL_DIR}"/ /tmp/renamed_deleted_files.json | tee /tmp/"${FILE_TYPE_LOCAL_DIR}"_renamed_deleted_files.json || true
+      #       if [ -s /tmp/"${FILE_TYPE_LOCAL_DIR}"_renamed_deleted_files.json ]; then
+      #         cat < /tmp/"${FILE_TYPE_LOCAL_DIR}"_renamed_deleted_files.json | xargs -I {} basename {} | tee /tmp/"${FILE_TYPE_LOCAL_DIR}"_renamed_deleted_files_basename.json
+      #         cat < /tmp/"${FILE_TYPE_LOCAL_DIR}"_renamed_deleted_files_basename.json | xargs -I {} gsutil rm gs://"${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}"/"${FILE_TYPE_GCS_DIR}"/{} || true
+      #       fi
+      #     done
+
+      #     # listing all dags and parms files for troubleshooting and debugging after changes
+      #     gsutil ls -lh gs://"${{ steps.tf_outputs.outputs.composer_gcs_bucket_name }}"/{dags,data}/ | sort -k 3 -r | tee /tmp/gsutil-ls-after-push.log
+      #     # showing diff mostly for debugging and troubleshooting purposes. A few important checks:
+      #     # Number of changes should be equal to the number of Airflow DAGs/parms modified (added, renamed and modified) files
+      #     # For explicitly deleted and old filename for renamed files a search for "xargs -I '{}' gsutil rm" can be helpful to count how many times gsutil ran to delete the files
+      #     diff /tmp/gsutil-ls-before-push.log /tmp/gsutil-ls-after-push.log || true
+
+      # Terraform plan
+      - name: Terraform Plan
+        if: github.event_name == 'pull_request'
+        id: plan
+        env:
+          TF_VAR_msteams_connection_password: ${{ secrets[format('MSTEAMS_CONNECTION_PASSWORD_{0}', steps.export_tfvars.outputs.env_suffix)] }}
+          TF_VAR_msteams_connection_reports_password: ${{ secrets[format('MSTEAMS_CONNECTION_REPORTS_PASSWORD_{0}', steps.export_tfvars.outputs.env_suffix)] }}
+        run: |
+          set -x
+          terraform plan -no-color -var-file env-"${GITHUB_BASE_REF}".tfvars.json 2>&1 | tee /tmp/tf-plan.log
+          sed -i '/Refreshing state.../d' /tmp/tf-plan.log
+          ls -l /tmp/tf-plan.log
+
+      - name: Airflow gcloud CLI - listing the available DAGs only for health-checking Composer Env
+        if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+        run: gcloud composer environments run composer-"${GITHUB_BASE_REF}" --location us-central1 dags list -- --output=json
+
+      - name: Pull Request comment
+        if: github.event_name == 'pull_request' && contains(env.COMPOSER_BRANCHES, github.base_ref)
+        uses: actions/github-script@v7
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Initialization')
+            })
+
+            // 2. Prepare format of the comment
+            const MAX_GITHUB_COMMENT_LENGTH = 65536;
+            const fs = require("fs");
+            let plan = fs.readFileSync("/tmp/tf-plan.log", "utf8");
+            if (plan.length > MAX_GITHUB_COMMENT_LENGTH) {
+              plan = "Please review the plan in github actions logs because it's too long"
+            }
+
+            // loading files from tj-actions/changed-files
+            added_dags = fs.readFileSync("/tmp/added_files.json", "utf8");
+            deleted_dags = fs.readFileSync("/tmp/deleted_files.json", "utf8");
+            modified_dags = fs.readFileSync("/tmp/modified_files.json", "utf8");
+            renamed_dags = fs.readFileSync("/tmp/renamed_files.json", "utf8");
+            other_modified_files = fs.readFileSync("/tmp/other_modified_files.json", "utf8");
+            // loading files from git log output
+            // when there isn't any file change under terraform/live/composer-dags/{env} the workflow step won't run
+            // so we need catch this exception and set an empty string to the variables, otherwise, PR comment will fail
+            try {
+              dags_renamed_deleted_files = fs.readFileSync("/tmp/dags_renamed_deleted_files.json", "utf8");
+            }
+            catch(err) {
+              dags_renamed_deleted_files = "";
+            }
+            try {
+              parms_renamed_deleted_files = fs.readFileSync("/tmp/parms_renamed_deleted_files.json", "utf8");
+            }
+            catch(err) {
+              parms_renamed_deleted_files = "";
+            }
+
+            const output = `#### Target environment/branch: \`${{ github.base_ref	}}\`
+
+            #### Airflow URI: <${{ steps.tf_outputs.outputs.airflow_uri }}>
+            #### Composer Environment: <https://console.cloud.google.com/composer/environments?project=${{ github.base_ref }}>
+
+            #### Added Airflow DAGs:
+            \`\`\`json\n
+            ${ added_dags }
+            \`\`\`
+
+            #### Modified Airflow DAGs:
+            \`\`\`json\n
+            ${ modified_dags }
+            \`\`\`
+
+            #### Renamed (new filename) Airflow DAGs:
+            \`\`\`json\n
+            ${ renamed_dags }
+            \`\`\`
+
+            #### Renamed (old filename) and Deleted Airflow DAGs:
+            \`\`\`json\n
+            ${ dags_renamed_deleted_files }
+            ${ parms_renamed_deleted_files }
+            \`\`\`
+
+            #### Other modified files:
+            \`\`\`json\n
+            ${ other_modified_files }
+            \`\`\`
+
+            #### Terraform Initialization: \`${{ steps.init_pr.outcome }}\`
+            #### Terraform Validation: \`${{ steps.validate.outcome }}\`
+
+            #### Important notes about terraform plan output for pull requests targeting \`bcs-csw-core-np\`:
+            - Pull Requests targeting \`bcs-csw-core-np\` will push Airflow DAG and parms files to provide a fast feedback loop while developing and fixing bug in Airflow DAGs
+            - So \`terraform plan\` for gcs objects \`resource google_storage_bucket_object dags_bayer OR parms_bayer\` may not be so accurate because the terraform state file and the remote bucket are not in sync
+            - This scenario can happen when having more than one open pull request changing files under \`terraform/live/composer-dags/np\`
+            - Please review \`terraform plan\` carefully and ensure your changes are giving the expected \`terraform plan\` output
+            - When a PR gets merged into \`bcs-csw-core-np\` it is required to update your feature branch to re-push Airflow DAGs being develop on your pull request
+
+            #### Terraform Plan: \`${{ steps.plan.outcome }}\`
+            \`\`\`terraform\n
+            ${ plan }
+            \`\`\`
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            // 3. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+  deployment:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, Linux, external-k8s]
+    needs: build
+    # Environments are created previously on GH UI and must have "selected branch protection" enabled to match its particular Google Project ID with its git branch
+    # Brach protection helps to prevent an accidental deployment from a pull request for example.
+    # Example:
+    ## GH Environment: bcs-csw-core-np
+    ### selected branch protection rule: bcs-csw-core-np
+    ## Google Project ID: bcs-csw-core-np
+    ## Git branch: bcs-csw-core-np
+    environment:
+      name: ${{ github.ref_name }}
+    concurrency: ${{ github.ref_name }}
+
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout Git repository
+        uses: actions/checkout@v4
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: ${{ env.TERRAFORM_CLI_VERSION }}
+          # Setting terraform_wrapper to false until setup-terraform action has fix for this issue: https://github.com/hashicorp/setup-terraform/issues/84
+          terraform_wrapper: false
+
+      - name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        id: 'auth'
+        with:
+          workload_identity_provider: "projects/${{ needs.build.outputs.wif_gcp_project_number }}/locations/global/workloadIdentityPools/${{ needs.build.outputs.wif_pool_id }}/providers/iac-bcs-csw-core-${{ needs.build.outputs.env_suffix }}"
+          service_account: "sa-wif-ghactions@${{ needs.build.outputs.gcp_project_id }}.iam.gserviceaccount.com"
+          export_environment_variables: true
+          # Not using the access token on this workflow however this is useful for getting faster feedback loop to troubleshoot auth issues otherwise this step can pass even when WIF authentication fails
+          token_format: 'access_token'
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          install_components: 'kubectl,gke-gcloud-auth-plugin'
+      - name: gcloud - show credentials info and debugging commands
+        run: gcloud info
+
+      # Terraform apply - it runs only when merging the PR into the target branch
+      - name: Terraform Init for Push
+        if: github.event_name == 'push'
+        id: init_push
+        run: terraform init -backend-config="bucket=tfstate-${{ github.ref_name }}" -backend-config="prefix=terraform/state"
+
+      - name: Terraform Apply for Push
+        if: github.event_name == 'push'
+        id: apply
+        env:
+          TF_VAR_msteams_connection_password: ${{ secrets[format('MSTEAMS_CONNECTION_PASSWORD_{0}', needs.build.outputs.env_suffix)] }}
+          TF_VAR_msteams_connection_reports_password: ${{ secrets[format('MSTEAMS_CONNECTION_REPORTS_PASSWORD_{0}', needs.build.outputs.env_suffix)] }}
+        run: terraform apply -auto-approve -no-color -var-file env-"${{ github.ref_name }}".tfvars.json
